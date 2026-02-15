@@ -5,3 +5,4 @@ __pycache__/
 
 # Poetry
 poetry.lock
+AWSCLIV2.pkg
