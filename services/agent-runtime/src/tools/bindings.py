@@ -5,76 +5,69 @@ from typing import List, Dict, Any
 
 import requests
 
-# Contract version (frozen handshake between agent and gateway)
+# Optional (only needed in AgentCore mode)
+try:
+    import boto3
+except Exception:
+    boto3 = None
+
 CONTRACT_VERSION = "v1"
 
-# Mode switch:
-# - "http" (default): call Tool Gateway over HTTP (local dev / docker-compose)
-# - "agentcore": call Tool Gateway hosted runtime via bedrock-agentcore InvokeAgentRuntime
-TOOL_GATEWAY_MODE = os.getenv("TOOL_GATEWAY_MODE", "http").lower()
-
-# HTTP mode settings
+# Local/dev HTTP gateway
 TOOL_GATEWAY_URL = os.getenv("TOOL_GATEWAY_URL", "http://localhost:8080")
 
-# AgentCore mode settings
-TOOL_GATEWAY_RUNTIME_ARN = os.getenv("TOOL_GATEWAY_RUNTIME_ARN")  # required for agentcore mode
+# AgentCore hosted Tool Gateway runtime ARN (Pattern A)
+TOOL_GATEWAY_RUNTIME_ARN = os.getenv("TOOL_GATEWAY_RUNTIME_ARN")  # e.g. arn:aws:bedrock-agentcore:...:runtime/hosted_agent_...
+
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 TOOL_GATEWAY_QUALIFIER = os.getenv("TOOL_GATEWAY_QUALIFIER", "DEFAULT")
-AWS_REGION = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+
+# AgentCore requires runtimeSessionId length >= 33
+def _new_session_id() -> str:
+    return f"session-{uuid.uuid4()}-{uuid.uuid4()}"  # safely > 33 chars
 
 
-def _new_runtime_session_id() -> str:
-    # AgentCore requires 33+ chars; uuid4 hex is 32, so prefix to be safe.
-    return "session-" + uuid.uuid4().hex  # 40 chars
-
-
-def _call_tool_gateway_http(payload: Dict[str, Any]) -> Dict[str, Any]:
-    resp = requests.post(
-        f"{TOOL_GATEWAY_URL}/tools/invoke",
-        json=payload,
-        timeout=20,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _call_tool_gateway_agentcore(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _invoke_gateway_agentcore(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not TOOL_GATEWAY_RUNTIME_ARN:
-        raise RuntimeError("TOOL_GATEWAY_RUNTIME_ARN is required when TOOL_GATEWAY_MODE=agentcore")
-
-    import boto3  # imported here so local HTTP users don't need boto3 installed
+        raise RuntimeError("TOOL_GATEWAY_RUNTIME_ARN is not set")
+    if boto3 is None:
+        raise RuntimeError("boto3 not available in this environment")
 
     client = boto3.client("bedrock-agentcore", region_name=AWS_REGION)
 
-    # Tool-gateway container should accept this JSON payload (via /invocations mapping)
-    body = json.dumps(payload)
-
-    response = client.invoke_agent_runtime(
+    resp = client.invoke_agent_runtime(
         agentRuntimeArn=TOOL_GATEWAY_RUNTIME_ARN,
-        runtimeSessionId=_new_runtime_session_id(),
-        payload=body,
-        qualifier=TOOL_GATEWAY_QUALIFIER,  # DEFAULT
+        runtimeSessionId=_new_session_id(),
+        payload=json.dumps(payload),
+        qualifier=TOOL_GATEWAY_QUALIFIER,  # DEFAULT is fine
     )
 
-    # AgentCore returns a streaming body in response["response"]
-    raw = response["response"].read()
-    data = json.loads(raw)
+    raw = resp["response"].read()
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        raise RuntimeError("Empty response from Tool Gateway runtime")
 
-    return data
+    return json.loads(text)
 
 
-def _call_tool_gateway(payload: Dict[str, Any]) -> Dict[str, Any]:
-    if TOOL_GATEWAY_MODE == "agentcore":
-        return _call_tool_gateway_agentcore(payload)
-    return _call_tool_gateway_http(payload)
+def _invoke_gateway_http(payload: Dict[str, Any]) -> Dict[str, Any]:
+    r = requests.post(
+        f"{TOOL_GATEWAY_URL}/tools/invoke",
+        json=payload,
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _invoke_gateway(payload: Dict[str, Any]) -> Dict[str, Any]:
+    # If TOOL_GATEWAY_RUNTIME_ARN is set, assume we are in AgentCore-to-AgentCore mode.
+    if TOOL_GATEWAY_RUNTIME_ARN:
+        return _invoke_gateway_agentcore(payload)
+    return _invoke_gateway_http(payload)
 
 
 def search_kb(query: str) -> List[Dict[str, Any]]:
-    """
-    Calls the Tool Gateway search_kb tool.
-    Works in two modes:
-      - HTTP mode (local): POST http://TOOL_GATEWAY_URL/tools/invoke
-      - AgentCore mode: InvokeAgentRuntime -> Tool Gateway hosted runtime
-    """
     payload = {
         "contract_version": CONTRACT_VERSION,
         "tool_name": "search_kb",
@@ -84,19 +77,17 @@ def search_kb(query: str) -> List[Dict[str, Any]]:
         "correlation_id": os.getenv("CORRELATION_ID"),
     }
 
-    body = _call_tool_gateway(payload)
+    body = _invoke_gateway(payload)
 
-    # Defensive checks
     if body.get("contract_version") != CONTRACT_VERSION:
         raise RuntimeError("Tool Gateway contract version mismatch")
 
     if not body.get("ok"):
-        error = body.get("error", {}) or {}
+        error = body.get("error", {})
         raise RuntimeError(error.get("message", "Tool call failed"))
 
-    output = body.get("output", {}) or {}
+    output = body.get("output", {})
     results = output.get("results")
-
     if results is None:
         raise RuntimeError("Malformed tool response: missing 'results'")
 
