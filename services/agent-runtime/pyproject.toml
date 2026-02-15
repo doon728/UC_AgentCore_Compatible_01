@@ -11,6 +11,8 @@ python = "^3.11"
 langgraph = "*"
 pyyaml = "^6.0"
 python-dotenv = "^1.0.0"  # For managing environment variables
+fastapi = "^0.129.0"
+uvicorn = {extras = ["standard"], version = "^0.40.0"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
