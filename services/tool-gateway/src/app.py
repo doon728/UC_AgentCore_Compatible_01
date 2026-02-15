@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Callable
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
+
+from src.contract import (
+    CONTRACT_VERSION,
+    ok_response,
+    err_response,
+)
+
+from src.tools.registry import TOOL_REGISTRY, ToolSpec
+
+app = FastAPI(title="Tool Gateway", version=CONTRACT_VERSION)
+
+
+# -----------------------
+# Return envelope (not 422) on validation errors
+# -----------------------
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    tool_name = "<invalid>"
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and body.get("tool_name"):
+            tool_name = body["tool_name"]
+    except Exception:
+        pass
+
+    payload = err_response(
+        tool_name=tool_name,
+        code="VALIDATION_ERROR",
+        message="Request validation failed",
+    )
+    payload["error"]["details"] = exc.errors()
+    return JSONResponse(status_code=200, content=payload)
+
+
+# -----------------------
+# Request model (envelope stays stable)
+# -----------------------
+class ToolInvokeRequestModel(BaseModel):
+    contract_version: str = CONTRACT_VERSION
+    tool_name: str = Field(..., min_length=1)
+    input: Dict[str, Any]
+    tenant_id: Optional[str] = None
+    user_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+
+
+# -----------------------
+# Minimal auth/context middleware (stub)
+# -----------------------
+@app.middleware("http")
+async def log_context(request: Request, call_next: Callable):
+    tenant_id = request.headers.get("x-tenant-id")
+    user_id = request.headers.get("x-user-id")
+    correlation_id = request.headers.get("x-correlation-id")
+
+    print(
+        f"[tool-gateway] {request.method} {request.url.path} "
+        f"tenant={tenant_id} user={user_id} corr={correlation_id}"
+    )
+
+    return await call_next(request)
+
+
+# -----------------------
+# Endpoints
+# -----------------------
+@app.get("/health")
+def health() -> dict:
+    return {"ok": True, "contract_version": CONTRACT_VERSION}
+
+
+@app.post("/tools/invoke")
+def invoke_tool(req: ToolInvokeRequestModel) -> dict:
+    # Contract version check (agent + gateway must match)
+    if req.contract_version != CONTRACT_VERSION:
+        return err_response(
+            tool_name=req.tool_name,
+            code="CONTRACT_VERSION_MISMATCH",
+            message=f"Expected {CONTRACT_VERSION}, got {req.contract_version}",
+        )
+
+    spec: ToolSpec | None = TOOL_REGISTRY.get(req.tool_name)
+    if spec is None:
+        return err_response(
+            tool_name=req.tool_name,
+            code="UNKNOWN_TOOL",
+            message=f"Unknown tool: {req.tool_name}",
+        )
+
+    # Validate tool input against tool-specific schema
+    try:
+        typed_input = spec.input_model.model_validate(req.input)
+    except ValidationError as e:
+        payload = err_response(
+            tool_name=req.tool_name,
+            code="TOOL_INPUT_INVALID",
+            message="Tool input validation failed",
+        )
+        payload["error"]["details"] = e.errors()
+        return payload
+
+    # Execute tool
+    try:
+        typed_output = spec.handler(typed_input)
+    except Exception as e:
+        return err_response(
+            tool_name=req.tool_name,
+            code="TOOL_EXECUTION_ERROR",
+            message=str(e),
+        )
+
+    # Validate tool output schema (defensive)
+    try:
+        validated_output = spec.output_model.model_validate(typed_output)
+    except ValidationError as e:
+        payload = err_response(
+            tool_name=req.tool_name,
+            code="TOOL_OUTPUT_INVALID",
+            message="Tool output validation failed",
+        )
+        payload["error"]["details"] = e.errors()
+        return payload
+
+    return ok_response(req.tool_name, validated_output.model_dump())

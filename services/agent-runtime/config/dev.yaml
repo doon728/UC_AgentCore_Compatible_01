@@ -1,0 +1,16 @@
+environment: development
+logging:
+  level: DEBUG
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+tool_gateway:
+  url: http://localhost:8080
+  timeout: 10
+
+observability:
+  enabled: false
+  sampling_rate: 0.1
+
+secrets:
+  kb_api_key: placeholder_dev_key
+  db_connection: sqlite:///dev_database.db
