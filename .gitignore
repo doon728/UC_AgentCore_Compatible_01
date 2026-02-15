@@ -6,3 +6,10 @@ __pycache__/
 # Poetry
 poetry.lock
 AWSCLIV2.pkg
+
+# --- build artifacts (never commit) ---
+**/build/
+**/*.zip
+**/*.pkg
+.DS_Store
+.DS_Store
