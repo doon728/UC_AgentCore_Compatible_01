@@ -130,3 +130,35 @@ def invoke_tool(req: ToolInvokeRequestModel) -> dict:
         return payload
 
     return ok_response(req.tool_name, validated_output.model_dump())
+
+
+@app.post("/invocations")
+async def invocations(request: Request) -> JSONResponse:
+    """
+    AgentCore container contract endpoint.
+
+    Behavior:
+    - If payload looks like ToolInvokeRequestModel ({tool_name, input, ...}), pass-through
+    - Else, if payload has {prompt|text}, map it to a default tool "search_kb" with {query: ...}
+    """
+    # Try JSON first
+    try:
+        payload: Any = await request.json()
+    except Exception:
+        payload = None
+
+    # Pass-through if already in tool-gateway format
+    if isinstance(payload, dict) and "tool_name" in payload and "input" in payload:
+        req = ToolInvokeRequestModel(**payload)
+        return JSONResponse(content=invoke_tool(req))
+
+    # Otherwise map a simple prompt/text to a default tool
+    prompt = ""
+    if isinstance(payload, dict):
+        prompt = payload.get("prompt") or payload.get("text") or ""
+
+    req = ToolInvokeRequestModel(
+        tool_name="search_kb",
+        input={"query": prompt},
+    )
+    return JSONResponse(content=invoke_tool(req))
