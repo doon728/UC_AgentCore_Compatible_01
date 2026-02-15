@@ -4,7 +4,6 @@ __pycache__/
 *.pyc
 
 # Poetry
-poetry.lock
 AWSCLIV2.pkg
 
 # --- build artifacts (never commit) ---
