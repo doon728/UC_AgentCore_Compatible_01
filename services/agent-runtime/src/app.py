@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
